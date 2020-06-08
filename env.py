@@ -14,11 +14,11 @@ class AWSEnvironment(object):
             self.objs[key] = []
             self.objs[key].append(value)
 
-    def _tag_resource(self, resource_ids, tags):
+    def _tag_resources(self, resource_ids, tags):
         client('ec2').create_tags(
             Resources=resource_ids, Tags=tags)
 
-    def create_vpc(self, cidr_block):
+    def create_vpc(self, cidr_block='10.0.0.0/16'):
         vpc_id = client('ec2').create_vpc(
             CidrBlock=cidr_block)['Vpc']['VpcId']
         while client('ec2').describe_vpcs(
@@ -26,7 +26,7 @@ class AWSEnvironment(object):
                 sleep(2)
         self.objs['vpc'] = vpc_id
 
-    def create_public_subnets(self, az_count):
+    def create_public_subnets(self, az_count=2):
         vpc_id, cidr_block = self.get_vpc()
         public_tag = {'Key': 'type', 'Value': 'public'}
 
@@ -38,7 +38,7 @@ class AWSEnvironment(object):
 
         rtb_id = client('ec2').create_route_table(
             VpcId=self.objs['vpc'])['RouteTable']['RouteTableId']
-        self._tag_resource([rtb_id], [public_tag])
+        self._tag_resources([rtb_id], [public_tag])
         self._append_to_objs('rtb', rtb_id)
 
         client('ec2').create_route(
@@ -67,20 +67,20 @@ class AWSEnvironment(object):
             while client('ec2').describe_subnets(
                 SubnetIds=[subnet_id])['Subnets'][0]['State'] != 'available':
                     sleep(2)
-            self._tag_resource([subnet_id], [public_tag])
+            self._tag_resources([subnet_id], [public_tag])
             self._append_to_objs('subnet', subnet_id)
             rtbassoc_id = client('ec2').associate_route_table(
                 RouteTableId=rtb_id,
                 SubnetId=subnet_id)['AssociationId']
             self._append_to_objs('rtbassoc', rtbassoc_id)
 
-    def create_private_subnets(self, az_count):
+    def create_private_subnets(self, az_count=2):
         vpc_id, cidr_block = self.get_vpc()
         private_tag = {'Key': 'type', 'Value': 'private'}
 
         rtb_id = client('ec2').create_route_table(
             VpcId=self.objs['vpc'])['RouteTable']['RouteTableId']
-        self._tag_resource([rtb_id], [private_tag])
+        self._tag_resources([rtb_id], [private_tag])
         self._append_to_objs('rtb', rtb_id)
 
         cidr_partition = str(list(ip_network(cidr_block).subnets())[1])
@@ -102,7 +102,7 @@ class AWSEnvironment(object):
             while client('ec2').describe_subnets(
                 SubnetIds=[subnet_id])['Subnets'][0]['State'] != 'available':
                     sleep(2)
-            self._tag_resource([subnet_id], [private_tag])
+            self._tag_resources([subnet_id], [private_tag])
             self._append_to_objs('subnet', subnet_id)
             rtbassoc_id = client('ec2').associate_route_table(
                 RouteTableId=rtb_id,
@@ -110,9 +110,8 @@ class AWSEnvironment(object):
             self._append_to_objs('rtbassoc', rtbassoc_id)
 
     def create_nat_gateway(self, subnet_id):
-        vpc = resource('ec2').Vpc(self.objs['vpc'])
         ip_allocation_id = client('ec2').allocate_address(Domain='vpc')['AllocationId']
-        self._append_to_objs('ip_allocations', ip_allocation_id)
+        self._append_to_objs('eipalloc', ip_allocation_id)
         ngw_id = client('ec2').create_nat_gateway(
             AllocationId=ip_allocation_id, SubnetId=subnet_id)['NatGateway']['NatGatewayId']
         print("Waiting for Nat Gateway to become available.")
@@ -120,8 +119,7 @@ class AWSEnvironment(object):
             ['NatGateways'][0]['State'] != 'available':
                 sleep(5)
         self._append_to_objs('nat_gateways', ngw_id)
-        subnet = resource('ec2').Subnet(id=subnet_id)
-        subnet.create_tags(Tags=[
+        self._tag_resources([subnet_id],[
             {'Key': 'ngw_id', 'Value': ngw_id},
             {'Key': 'ip_allocation_id', 'Value': ip_allocation_id}])
         rt = next(rt for rt in \
@@ -233,9 +231,9 @@ class AWSEnvironment(object):
 
 if __name__ == '__main__':
   AWS = AWSEnvironment()
-  AWS.create_vpc('10.0.0.0/16')
-  AWS.create_private_subnets(2)
-  AWS.create_public_subnets(2)
-# AWS.create_nat_gateway(AWS.get_subnets('public')[0])
+  AWS.create_vpc()
+  AWS.create_private_subnets()
+  AWS.create_public_subnets()
+  AWS.create_nat_gateway(AWS.get_subnets('public')[0])
   print(AWS.objs)
   AWS.delete_all()
