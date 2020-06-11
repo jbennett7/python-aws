@@ -31,6 +31,18 @@ AWS.create_subnets(stype='public')
 AWS.create_nat_gateway(AWS.get_subnets('public')[0])
 ```
 
+## New Features
+* __10-JUN-2020__: Adds a method to save and load the current state:
+```python3.7
+AWS = AWSEnvironment()
+AWS.create_vpc()
+AWS.save('./vpc_saved.yaml')
+del(AWS)
+AWS2 = AWSEnvironment(path='./vpc_saved.yaml')
+AWS.create_subnets()
+print(AWS.objs)
+```
+
 ## Details
 * The purpose of this module is to setup an AWS networking environment with
 the least amount of configuraiton as possible. 
