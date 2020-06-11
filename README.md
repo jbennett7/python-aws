@@ -4,8 +4,24 @@
 Builds out an aws VPC environment.
 
 ## Quick Start
+Make sure to turn on saving in `vpc.py`:
+```python3.7
+AWS = AWSEnvironment()
+AWS.create_vpc()
+AWS.create_subnets(stype='public')
+AWS._save('vpc_saved.py')
+```
 ```bash
-python3.7 env.py
+python3.7 vpc.py
+```
+Note the `vpc id` and the `subnet id`. set the `VPC_ID` and `SUBNET_ID`
+variables to these. Then execute
+```python3.7
+VPC_ID="xxxxxx"
+SUBNET_ID="xxxxx"
+```
+```bash
+python3.7 eks.py
 ```
 
 ## Deployment Strategies
@@ -48,16 +64,8 @@ Right now it just creates the IAM role EKSRole, and four security groups:
 eks = AWSEks(vpc_id=VPC_ID)
 eks.create_eks_role()
 eks.create_security_groups()
-eks.authorize_control_plane_security_group_ingress()
-eks.authorize_control_plane_security_group_egress()
-eks.authorize_worker_node_security_group_ingress()
-eks.revoke_worker_node_security_group_ingress()
-eks.authorize_alb_security_group_ingress()
-eks.revoke_alb_security_group_ingress()
-eks.authorize_bastion_host_security_group_ingress()
-eks.revoke_bastion_host_security_group_ingress()
-eks.revoke_control_plane_security_group_ingress()
-eks.revoke_control_plane_security_group_egress()
+eks.authorize_security_group_policies()
+eks.revoke_security_group_policies()
 print(eks.objs)
 eks.delete_security_groups()
 eks.delete_eks_role()
