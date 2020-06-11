@@ -1,0 +1,13 @@
+[
+    {
+        "FromPort": 1025,
+        "ToPort": 65535,
+        "IpProtocol": "tcp",
+        "UserIdGroupPairs": [
+            {
+                "Description": "Allow outbound access to the worker nodes.",
+                "GroupId": "{{ worker_sg_id }}"
+            }
+        ]
+    }
+]
