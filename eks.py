@@ -1,27 +1,28 @@
-from boto3 import client
-from time import sleep
+from os import getcwd, remove
+from sys import path
+path.append('/'.join(getcwd().split('/')[:-1]))
+from utility import iam, eks, ec2
+
 from jinja2 import Template
 import json
+import yaml
 
-VPC_ID="vpc-0438aaee9ab9f4c25"
-SUBNET_ID="subnet-0eb4bad3b692c74ef"
 EKS_ASSUME_ROLE_POLICY_DOCUMENT_PATH="policies/eks_assume.json"
-
+EKS_WORKER_ASSUME_ROLE_POLICY_DOCUMENT_PATH="policies/eks_worker_assume.json"
 CONTROL_PLANE_INGRESS="sg_policies/control_plane_ingress.json.j2"
 WORKER_NODE_INGRESS="sg_policies/worker_node_ingress.json.j2"
 BASTION_HOST_INGRESS="sg_policies/bastion_host_ingress.json.j2"
 ALB_INGRESS="sg_policies/alb_ingress.json.j2"
 
-def sleep1(): sleep(.25)
-def sleep2(): sleep(1)
-def iam(): return client('iam')
-def ec2(): return client('ec2')
-def eks(): return client('eks')
-
-class AWSEks(object):
-    def __init__(self, vpc_id):
-        self.objs = {}
-        self.objs['vpc'] = vpc_id
+class Eks(object):
+    def __init__(self, path=None):
+        # The keys follow the resource id preface for aws resource ids.
+        if path is not None:
+            with open(path) as f:
+                data = f.read()
+            self.objs = yaml.load(data)
+        else:
+            self.objs = {}
 
     def _append_to_objs(self, key, value):
         try:
@@ -43,8 +44,8 @@ class AWSEks(object):
             if sg['GroupName'] == 'EKSApplicationLoadBalancerSecurityGroup')
         return control_sg_id, worker_sg_id, bastion_sg_id, alb_sg_id
 
-    def create_eks_role(self):
-        role_name = 'EKSRole'
+    def create_eks_cluster_role(self):
+        role_name = 'EKSClusterRole'
         pfile = open(EKS_ASSUME_ROLE_POLICY_DOCUMENT_PATH)
         assume_role_policy_document = pfile.read().replace("\n", " ")
         pfile.close()
@@ -59,8 +60,28 @@ class AWSEks(object):
         except iam().exceptions.EntityAlreadyExistsException as e:
             iam().get_role(
                 RoleName=role_name)
-        self.objs['role'] = role_name
-
+        self._append_to_objs('role', role_name)
+    
+    def create_eks_worker_role(self):
+        role_name = "EKSWorkerRole"
+        pfile = open(EKS_WORKER_ASSUME_ROLE_POLICY_DOCUMENT_PATH)
+        assume_role_policy_document = pfile.read().replace("\n", " ")
+        pfile.close()
+        try:
+            iam().create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument=assume_role_policy_document)
+            for policy in ['AmazonEKSWorkerNodePolicy',
+                           'AmazonEKS_CNI_Policy',
+                           'AmazonEC2ContainerRegistryReadOnly']:
+                iam().attach_role_policy(
+                    RoleName=role_name,
+                    PolicyArn="arn:aws:iam::aws:policy/{}".format(policy))
+        except iam().exceptions.EntityAlreadyExistsException as e:
+            iam().get_role(
+                RoleName=role_name)
+        self._append_to_objs('role', role_name)
+    
     def create_security_groups(self):
         vpc_id = self.objs['vpc']
         control_sg_id = ec2().create_security_group(
@@ -115,21 +136,10 @@ class AWSEks(object):
             ec2().delete_security_group(GroupId=sg)
         del(self.objs['sg'])
 
-    def delete_eks_role(self):
+    def delete_eks_cluster_role(self):
         for policy in [ 'AmazonEKSClusterPolicy', 'AmazonEKSServicePolicy']:
             iam().detach_role_policy(
                 RoleName=self.objs['role'],
                 PolicyArn="arn:aws:iam::aws:policy/{}".format(policy))
         iam().delete_role(RoleName=self.objs['role'])
         del(self.objs['role'])
-
-if __name__ == '__main__':
-    eks = AWSEks(vpc_id=VPC_ID)
-    eks.create_eks_role()
-    eks.create_security_groups()
-    eks.authorize_security_group_policies()
-    eks.revoke_security_group_policies()
-    print(eks.objs)
-    eks.delete_security_groups()
-    eks.delete_eks_role()
-    print(eks.objs)

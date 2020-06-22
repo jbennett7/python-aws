@@ -1,44 +1,22 @@
+from os import getcwd, remove
+from sys import path
+path.append('/'.join(getcwd().split('/')[:-1]))
+
+from utility import ec2, sleep1, sleep2, sleep3
+
 import yaml
-from boto3 import client
 from ipaddress import ip_network
-from time import sleep
 
-#TODO: Add these to a utility file so they can be reused.
-def sleep1(): sleep(.25)
-def sleep2(): sleep(1)
-def sleep3(): sleep(5)
-def ec2(): return client('ec2')
+class Vpc(object):
 
-class AWSEnvironment(object):
-
-    def __init__(self, path=None):
-        # The keys follow the resource id preface for aws resource ids.
-        if path is not None:
-            with open(path) as f:
-                data = f.read()
-            self.objs = yaml.load(data)
-        else:
-            self.objs = {}
-
-    def _save(self, path):
-        with open(path, 'w') as f:
-            yaml.dump(self.objs, f, default_flow_style=False)
-
-    def _append_to_objs(self, key, value):
-        try:
-            self.objs[key].append(value)
-        except KeyError:
-            self.objs[key] = []
-            self.objs[key].append(value)
+    def __init__(self, obj_list):
+            self.objs = obj_list
 
     def _tag_resources(self, resource_ids, tags):
         ec2().create_tags(
             Resources=resource_ids, Tags=tags)
 
     def create_vpc(self, cidr_block='10.0.0.0/16'):
-        """
-        Creates the VPC with a cidr block.
-        """
         vpc_id = ec2().create_vpc(
             CidrBlock=cidr_block)['Vpc']['VpcId']
         sleep1()
@@ -48,17 +26,6 @@ class AWSEnvironment(object):
         self.objs['vpc'] = vpc_id
 
     def create_subnets(self, stype='private', az_count=2):
-        """
-        Creates subnets inside mulitple availability zones
-        with the following resources:
-
-            * An internet gateway if `stype` == 'public'.
-            * A route table to associate with the subnets.
-            * A route created in the route table for internet traffic
-              if `stype` == 'public'.
-            * An `az_count` number of subnets in different availability zones.
-            * Route table associations for each subnet to the route table.
-        """
         vpc_id, cidr_block = self.get_vpc()
         subnet_tag = {'Key': 'type', 'Value': stype}
 
@@ -81,14 +48,14 @@ class AWSEnvironment(object):
                     VpcId=self.objs['vpc'])['RouteTable']['RouteTableId']
                 sleep1()
                 self._tag_resources([rtb_id], [subnet_tag])
-                self._append_to_objs('rtb', rtb_id)
+                self.objs.append_to_objs('rtb', rtb_id)
                 if stype == 'public':
                     ec2().create_route(
                         DestinationCidrBlock='0.0.0.0/0',
                         GatewayId=self.objs['igw'],
                         RouteTableId=rtb_id)
                     sleep1()
-                    self._append_to_objs('route', 
+                    self.objs.append_to_objs('route', 
                         {'rtb': rtb_id, 'destination_cidr': '0.0.0.0/0'})
 
         i=1 if stype == 'public' else 0
@@ -113,25 +80,21 @@ class AWSEnvironment(object):
                 SubnetIds=[subnet_id])['Subnets'][0]['State'] != 'available':
                     sleep1()
             self._tag_resources([subnet_id], [subnet_tag])
-            self._append_to_objs('subnet', subnet_id)
-            rtbassoc_id = ec2().associate_route_table(
+            self.objs.append_to_objs('subnet', subnet_id)
+            ec2().associate_route_table(
                 RouteTableId=rtb_id,
-                SubnetId=subnet_id)['AssociationId']
-            self._append_to_objs('rtbassoc', rtbassoc_id)
+                SubnetId=subnet_id)
 
     def create_nat_gateway(self, subnet_id):
-        """
-        Creates a nat gateway for the public/private demarc subnetting strategy.
-        """
         eipalloc_id = ec2().allocate_address(Domain='vpc')['AllocationId']
-        self._append_to_objs('eipalloc', eipalloc_id)
+        self.objs.append_to_objs('eipalloc', eipalloc_id)
         ngw_id = ec2().create_nat_gateway(
             AllocationId=eipalloc_id, SubnetId=subnet_id)['NatGateway']['NatGatewayId']
         print("Waiting for Nat Gateway to become available.")
         while ec2().describe_nat_gateways(NatGatewayIds=[ngw_id])\
             ['NatGateways'][0]['State'] != 'available':
                 sleep3()
-        self._append_to_objs('nat_gateways', ngw_id)
+        self.objs.append_to_objs('nat_gateways', ngw_id)
         self._tag_resources([subnet_id],[
             {'Key': 'ngw_id', 'Value': ngw_id},
             {'Key': 'ip_allocation_id', 'Value': eipalloc_id}])
@@ -163,8 +126,9 @@ class AWSEnvironment(object):
                 ['NatGateways']]):
                             sleep3()
             del(self.objs['nat_gateways'])
-        except KeyError:
             return 0
+        except KeyError:
+            return -1
 
     def delete_ip_allocations(self):
         try:
@@ -172,46 +136,27 @@ class AWSEnvironment(object):
                 ec2().release_address(
                     AllocationId=eipalloc_id)
             del(self.objs['eipalloc'])
-        except KeyError:
             return 0
-
-    def delete_routes(self):
-        try:
-            for route in self.objs['route']:
-                rtb_id = route['rtb']
-                dest_cidr = route['destination_cidr']
-                ec2().delete_route(
-                    DestinationCidrBlock=dest_cidr,
-                    RouteTableId=rtb_id)
-            del(self.objs['route'])
         except KeyError:
-            return 0
-
-    def delete_route_table_associations(self):
-        try:
-            for rtbassoc_id in self.objs['rtbassoc']:
-                ec2().disassociate_route_table(
-                    AssociationId=rtbassoc_id)
-            del(self.objs['rtbassoc'])
-        except KeyError:
-            return 0
+            return -1
 
     def delete_route_tables(self):
-        try:
-            for rtb_id in self.objs['rtb']:
-                ec2().delete_route_table(
-                    RouteTableId=rtb_id)
-            del(self.objs['rtb'])
-        except KeyError:
-            return 0
+        for rt in ec2().describe_route_tables(RouteTableIds=self.objs['rtb'])['RouteTables']:
+            main=False
+            for association in rt['Associations']:
+                if association['Main'] == True:
+                    main=True
+                    continue
+                ec2().disassociate_route_table(
+                    AssociationId=association['RouteTableAssociationId'])
+            if main == False:
+                ec2().delete_route_table(RouteTableId=rt['RouteTableId'])
+        del(self.objs['rtb'])
 
     def delete_subnets(self):
-        try:
-            for subnet_id in self.objs['subnet']:
-                ec2().delete_subnet(SubnetId=subnet_id)
-            del(self.objs['rtb'])
-        except KeyError:
-            return 0
+        for subnet_id in self.objs['subnet']:
+            ec2().delete_subnet(SubnetId=subnet_id)
+        del(self.objs['subnet'])
 
     def delete_internet_gateway(self):
         try:
@@ -222,6 +167,7 @@ class AWSEnvironment(object):
                 VpcId=vpc_id)
             ec2().delete_internet_gateway(
                 InternetGatewayId=igw_id)
+            del(self.objs['igw'])
         except KeyError:
             return 0
 
@@ -229,6 +175,7 @@ class AWSEnvironment(object):
         try:
             ec2().delete_vpc(
                 VpcId=self.objs['vpc'])
+            del(self.objs['vpc'])
         except KeyError:
             return 0
 
@@ -236,19 +183,7 @@ class AWSEnvironment(object):
         self.delete_nat_gateways()
         self.delete_ip_allocations()
         self.delete_routes()
-        self.delete_route_table_associations()
         self.delete_route_tables()
         self.delete_subnets()
         self.delete_internet_gateway()
         self.delete_vpc()
-
-if __name__ == '__main__':
-  AWS = AWSEnvironment()
-# AWS = AWSEnvironment(path='./vpc_save.yaml')
-  AWS.create_vpc()
-  AWS.create_subnets()
-# AWS.create_subnets(stype='public')
-# AWS.create_nat_gateway(AWS.get_subnets('public')[0])
-  print(AWS.objs)
-# AWS._save('./vpc_save.yaml')
-# AWS.delete_all()
