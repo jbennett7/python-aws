@@ -47,6 +47,7 @@ class Vpc(object):
             Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
                 ['RouteTables'][0]['RouteTableId']
 
+
     def create_vpc(self, cidr_block='10.0.0.0/16'):
         vpc_id = ec2().create_vpc(
             CidrBlock=cidr_block)['Vpc']['VpcId']
@@ -129,19 +130,7 @@ class Vpc(object):
             ec2().describe_route_tables(RouteTableIds=self.objs['rtb'])\
             ['RouteTables'] for t in rt['Tags'] \
             if t['Key'] == 'type' and t['Value'] == 'private')
-
-    def get_subnets(self, sub_type):
-        try:
-            return [s['SubnetId'] for s in \
-                ec2().describe_subnets(SubnetIds=self.objs['subnet'])['Subnets'] \
-                for t in s['Tags'] if t['Key'] == 'type' and t['Value'] == sub_type]
-        except KeyError:
-            return []
-
-    def get_vpc(self):
-        vpc = ec2().describe_vpcs(
-            VpcIds=[self.objs['vpc']])['Vpcs'][0]
-        return vpc['VpcId'], vpc['CidrBlock']
+###
 
     def delete_nat_gateways(self):
         try:
