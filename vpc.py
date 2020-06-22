@@ -112,6 +112,7 @@ class Vpc(object):
         self.objs.append_to_objs('eipalloc', eipalloc_id)
         return eipalloc_id
 
+###
     def create_nat_gateway(self, affinity_group=0):
         eipalloc_id = self.create_ip_allocation()
         ngw_id = ec2().create_nat_gateway(
@@ -132,8 +133,8 @@ class Vpc(object):
     def get_subnets(self, sub_type):
         try:
             return [s['SubnetId'] for s in \
-                    ec2().describe_subnets(SubnetIds=self.objs['subnet'])['Subnets'] \
-                    for t in s['Tags'] if t['Key'] == 'type' and t['Value'] == sub_type]
+                ec2().describe_subnets(SubnetIds=self.objs['subnet'])['Subnets'] \
+                for t in s['Tags'] if t['Key'] == 'type' and t['Value'] == sub_type]
         except KeyError:
             return []
 
