@@ -29,11 +29,23 @@ class Vpc(object):
     def _get_next_az(self, affinity_group=0):
         az_dict = {a['ZoneName']: 0 for a in \
             ec2().describe_availability_zones()['AvailabilityZones']}
-        for az in [a['AvailabilityZones'] for a in ec2().describe_subnets(Filters=[
+        for az in [a['AvailabilityZone'] for a in ec2().describe_subnets(Filters=[
             {'Name': 'vpc-id', 'Values': [self.objs['vpc']]} ])['Subnets']]:
                 az_dict[az] = az_dict[az] + 1
         min_value = min(az_dict.values())
         return next(k for k, v in az_dict.items() if v == min_value)
+
+    def _get_af_subnets(self, affinity_group=0):
+        return [s['SubnetId'] for s in ec2().describe_subnets(
+            SubnetIds=self.objs['subnet'],
+            Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
+                ['Subnets']]
+
+    def _get_af_rtb(self, affinity_group=0):
+        return ec2().describe_route_tables(
+            RouteTableIds=self.objs['rtb'],
+            Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
+                ['RouteTables'][0]['RouteTableId']
 
     def create_vpc(self, cidr_block='10.0.0.0/16'):
         vpc_id = ec2().create_vpc(
@@ -54,25 +66,11 @@ class Vpc(object):
             AvailabilityZone=az,
             CidrBlock=cidr,
             VpcId=self.objs['vpc'])['Subnet']['SubnetId']
+        sleep1()
         self.objs.append_to_objs('subnet', subnet_id)
         self._tag_resources([subnet_id], subnet_tags)
-        if 'rtb' in self.objs:
-            rtb_list = [rtb['RouteTableId'] for rtb in ec2().describe_route_tables(
-                RouteTableIds=self.objs['rtb'],
-                Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
-                ['RouteTables']]
-            for r in rtb_list:
-                ec2().associate_route_table(
-                    RouteTableId=r,
-                    SubnetId=subnet_id)
 
     def create_route_table(self, affinity_group=0):
-        if len([rtb['RouteTableId'] for rtb in ec2().describe_route_tables(
-            RouteTableIds=self.objs['rtb'],
-            Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
-            ['RouteTables']]) > 0:
-                return 0
-
         rt_tags = [
             {'Key': 'affinity_group', 'Value': str(affinity_group)}
         ]
@@ -81,15 +79,13 @@ class Vpc(object):
         sleep1()
         self._tag_resources([rtb_id], rt_tags)
         self.objs.append_to_objs('rtb', rtb_id)
-        if 'subnet' in self.objs:
-            subnets = [s['SubnetId'] for s in ec2().describe_subnets(
-                SubnetIds=self.objs['subnet'],
-                Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
-                ['Subnets']]
-            for s in subnets:
-                ec2().associate_route_table(
-                    RouteTableId=rtb_id,
-                    SubnetId=s)
+
+    def associate_rt_subnet(self, affinity_group=0):
+        rtb_id = self._get_af_rtb(affinity_group)
+        for s in self._get_af_subnets(affinity_group):
+            ec2().associate_route_table(
+                RouteTableId=rtb_id,
+                SubnetId=s)
 
     def create_internet_gateway(self, affinity_group=0):
         igw_tags = [
@@ -97,26 +93,27 @@ class Vpc(object):
         ]
         self.objs['igw'] = ec2().create_internet_gateway()\
             ['InternetGateway']['InternetGatewayId']
+        sleep1()
         ec2().attach_internet_gateway(
             InternetGatewayId=self.objs['igw'],
             VpcId=self.objs['vpc'])
-        rtb_ids = [rtb['RouteTableId'] for rtb in \
-            ec2().describe_route_tables(RouteTableIds=self.objs['rtb'],
-            Filters=[{'Name': 'key:affinity_group', 'Values': [str(affinity_group)]}])\
-            ['RouteTables']]
+        rtb_id = self._get_af_rtb(affinity_group)
         subnet_ids = [s['SubnetId'] for s in \
             ec2().describe_subnets(SubnetIds=self.objs['subnet'],
-                Filters=[{'Name': 'Key:affinity_group', 'Values': [str(affinity_group)]}])\
+                Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
                 ['Subnets']]
-        for rtb in rtb_ids:
-            ec2().create_route(
-                DestinationCidrBlock='0.0.0.0/0',
-                GatewayId=self.objs['igw'],
-                RouteTableId=rtb_id)
+        ec2().create_route(
+            DestinationCidrBlock='0.0.0.0/0',
+            GatewayId=self.objs['igw'],
+            RouteTableId=rtb_id)
 
-    def create_nat_gateway(self, subnet_id):
+    def create_ip_allocation(self):
         eipalloc_id = ec2().allocate_address(Domain='vpc')['AllocationId']
         self.objs.append_to_objs('eipalloc', eipalloc_id)
+        return eipalloc_id
+
+    def create_nat_gateway(self, affinity_group=0):
+        eipalloc_id = self.create_ip_allocation()
         ngw_id = ec2().create_nat_gateway(
             AllocationId=eipalloc_id, SubnetId=subnet_id)['NatGateway']['NatGatewayId']
         print("Waiting for Nat Gateway to become available.")
@@ -165,27 +162,33 @@ class Vpc(object):
                 ec2().release_address(
                     AllocationId=eipalloc_id)
             del(self.objs['eipalloc'])
-            return 0
         except KeyError:
-            return -1
+            return 0
 
     def delete_route_tables(self):
-        for rt in ec2().describe_route_tables(RouteTableIds=self.objs['rtb'])['RouteTables']:
-            main=False
-            for association in rt['Associations']:
-                if association['Main'] == True:
-                    main=True
-                    continue
-                ec2().disassociate_route_table(
-                    AssociationId=association['RouteTableAssociationId'])
-            if main == False:
-                ec2().delete_route_table(RouteTableId=rt['RouteTableId'])
-        del(self.objs['rtb'])
+        try:
+            for rt in ec2().describe_route_tables(RouteTableIds=self.objs['rtb'])\
+                ['RouteTables']:
+                main=False
+                for association in rt['Associations']:
+                    if association['Main'] == True:
+                        main=True
+                        continue
+                    ec2().disassociate_route_table(
+                        AssociationId=association['RouteTableAssociationId'])
+                if main == False:
+                    ec2().delete_route_table(RouteTableId=rt['RouteTableId'])
+            del(self.objs['rtb'])
+        except KeyError:
+            return 0
 
     def delete_subnets(self):
-        for subnet_id in self.objs['subnet']:
-            ec2().delete_subnet(SubnetId=subnet_id)
-        del(self.objs['subnet'])
+        try:
+            for subnet_id in self.objs['subnet']:
+                ec2().delete_subnet(SubnetId=subnet_id)
+            del(self.objs['subnet'])
+        except KeyError:
+            return 0
 
     def delete_internet_gateway(self):
         try:
