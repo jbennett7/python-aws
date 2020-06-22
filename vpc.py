@@ -16,6 +16,25 @@ class Vpc(object):
         ec2().create_tags(
             Resources=resource_ids, Tags=tags)
 
+    def _get_available_cidr_block(self):
+        cidr_block = ec2().describe_vpcs(VpcIds=[self.objs['vpc']])['Vpcs'][0]['CidrBlock']
+        subnet_list = ec2().describe_subnets(
+            Filters=[{'Name': 'vpc-id', 'Values': [self.objs['vpc']]}])['Subnets']
+        cidr_list = [c['CidrBlock'] for c in subnet_list]
+        cidr = list(set([str(c) for c in list(ip_network(cidr_block).subnets(new_prefix=24))]) -
+            set(cidr_list))
+        cidr.sort()
+        return cidr[0]
+
+    def _get_next_az(self, affinity_group=0):
+        az_dict = {a['ZoneName']: 0 for a in \
+            ec2().describe_availability_zones()['AvailabilityZones']}
+        for az in [a['AvailabilityZones'] for a in ec2().describe_subnets(Filters=[
+            {'Name': 'vpc-id', 'Values': [self.objs['vpc']]} ])['Subnets']]:
+                az_dict[az] = az_dict[az] + 1
+        min_value = min(az_dict.values())
+        return next(k for k, v in az_dict.items() if v == min_value)
+
     def create_vpc(self, cidr_block='10.0.0.0/16'):
         vpc_id = ec2().create_vpc(
             CidrBlock=cidr_block)['Vpc']['VpcId']
@@ -25,65 +44,75 @@ class Vpc(object):
                 sleep1()
         self.objs['vpc'] = vpc_id
 
-    def create_subnets(self, stype='private', az_count=2):
-        vpc_id, cidr_block = self.get_vpc()
-        subnet_tag = {'Key': 'type', 'Value': stype}
+    def create_subnet(self, affinity_group=0):
+        subnet_tags = [
+            { 'Key': 'affinity_group', 'Value':  str(affinity_group) }
+        ]
+        az = self._get_next_az(affinity_group)
+        cidr = self._get_available_cidr_block()
+        subnet_id = ec2().create_subnet(
+            AvailabilityZone=az,
+            CidrBlock=cidr,
+            VpcId=self.objs['vpc'])['Subnet']['SubnetId']
+        self.objs.append_to_objs('subnet', subnet_id)
+        self._tag_resources([subnet_id], subnet_tags)
+        if 'rtb' in self.objs:
+            rtb_list = [rtb['RouteTableId'] for rtb in ec2().describe_route_tables(
+                RouteTableIds=self.objs['rtb'],
+                Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
+                ['RouteTables']]
+            for r in rtb_list:
+                ec2().associate_route_table(
+                    RouteTableId=r,
+                    SubnetId=subnet_id)
 
-        # only one internet gateway per vpc and
-        # only created if public subnets exist.
-        if stype == 'public' and 'igw' not in self.objs:
-            self.objs['igw'] = ec2().create_internet_gateway()\
-                ['InternetGateway']['InternetGatewayId']
-            ec2().attach_internet_gateway(
-                InternetGatewayId=self.objs['igw'],
-                VpcId=self.objs['vpc'])
+    def create_route_table(self, affinity_group=0):
+        if len([rtb['RouteTableId'] for rtb in ec2().describe_route_tables(
+            RouteTableIds=self.objs['rtb'],
+            Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
+            ['RouteTables']]) > 0:
+                return 0
 
-        # only one route table per subnet type for the vpc.
-        if 'rtb' not in self.objs or \
-            [rtb for rtb in ec2().describe_route_tables(
-            RouteTableIds=self.objs['rtb'])['RouteTables'] \
-            for t in rtb['Tags'] if t['Key'] == 'type' \
-            and t['Value'] == stype] == []:
-                rtb_id = ec2().create_route_table(
-                    VpcId=self.objs['vpc'])['RouteTable']['RouteTableId']
-                sleep1()
-                self._tag_resources([rtb_id], [subnet_tag])
-                self.objs.append_to_objs('rtb', rtb_id)
-                if stype == 'public':
-                    ec2().create_route(
-                        DestinationCidrBlock='0.0.0.0/0',
-                        GatewayId=self.objs['igw'],
-                        RouteTableId=rtb_id)
-                    sleep1()
-                    self.objs.append_to_objs('route', 
-                        {'rtb': rtb_id, 'destination_cidr': '0.0.0.0/0'})
+        rt_tags = [
+            {'Key': 'affinity_group', 'Value': str(affinity_group)}
+        ]
+        rtb_id = ec2().create_route_table(
+            VpcId=self.objs['vpc'])['RouteTable']['RouteTableId']
+        sleep1()
+        self._tag_resources([rtb_id], rt_tags)
+        self.objs.append_to_objs('rtb', rtb_id)
+        if 'subnet' in self.objs:
+            subnets = [s['SubnetId'] for s in ec2().describe_subnets(
+                SubnetIds=self.objs['subnet'],
+                Filters=[{'Name': 'tag:affinity_group', 'Values': [str(affinity_group)]}])\
+                ['Subnets']]
+            for s in subnets:
+                ec2().associate_route_table(
+                    RouteTableId=rtb_id,
+                    SubnetId=s)
 
-        i=1 if stype == 'public' else 0
-        cidr_partition = str(list(ip_network(cidr_block).subnets())[i])
-        az_list = [az['ZoneName'] \
-            for az in ec2().describe_availability_zones()\
-            ['AvailabilityZones']][:az_count]
-        for az in az_list:
-            cidr_list = [s['CidrBlock'] for s in ec2().describe_subnets(
-                Filters=[{'Name': 'vpc-id', 'Values': [self.objs['vpc']]}])['Subnets']]
-            cidr = list(set([str(c) for c in \
-                list(ip_network(cidr_partition).subnets(new_prefix=24))]) -
-                set(cidr_list))
-            cidr.sort()
-            cidr = cidr[0]
-            subnet_id = ec2().create_subnet(
-                AvailabilityZone=az,
-                CidrBlock=cidr,
-                VpcId=self.objs['vpc'])['Subnet']['SubnetId']
-            sleep1()
-            while ec2().describe_subnets(
-                SubnetIds=[subnet_id])['Subnets'][0]['State'] != 'available':
-                    sleep1()
-            self._tag_resources([subnet_id], [subnet_tag])
-            self.objs.append_to_objs('subnet', subnet_id)
-            ec2().associate_route_table(
-                RouteTableId=rtb_id,
-                SubnetId=subnet_id)
+    def create_internet_gateway(self, affinity_group=0):
+        igw_tags = [
+            {'Key': 'affinity_group', 'Value': str(affinity_group)}
+        ]
+        self.objs['igw'] = ec2().create_internet_gateway()\
+            ['InternetGateway']['InternetGatewayId']
+        ec2().attach_internet_gateway(
+            InternetGatewayId=self.objs['igw'],
+            VpcId=self.objs['vpc'])
+        rtb_ids = [rtb['RouteTableId'] for rtb in \
+            ec2().describe_route_tables(RouteTableIds=self.objs['rtb'],
+            Filters=[{'Name': 'key:affinity_group', 'Values': [str(affinity_group)]}])\
+            ['RouteTables']]
+        subnet_ids = [s['SubnetId'] for s in \
+            ec2().describe_subnets(SubnetIds=self.objs['subnet'],
+                Filters=[{'Name': 'Key:affinity_group', 'Values': [str(affinity_group)]}])\
+                ['Subnets']]
+        for rtb in rtb_ids:
+            ec2().create_route(
+                DestinationCidrBlock='0.0.0.0/0',
+                GatewayId=self.objs['igw'],
+                RouteTableId=rtb_id)
 
     def create_nat_gateway(self, subnet_id):
         eipalloc_id = ec2().allocate_address(Domain='vpc')['AllocationId']
