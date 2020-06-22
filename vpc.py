@@ -142,9 +142,8 @@ class Vpc(object):
                 ['NatGateways']]):
                             sleep3()
             del(self.objs['nat_gateways'])
-            return 0
         except KeyError:
-            return -1
+            return 0
 
     def delete_ip_allocations(self):
         try:
